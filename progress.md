@@ -9,3 +9,4 @@
 - 2026-11-01: Inspected the reference Wi-Fi scan project; added reusable `components/bsp/wifi_scan` module using the NVS/netif/STA/blocking-scan/AP-record flow. `main.c` now initializes OLED and calls `wifi_scan_show_on_oled()`.
 - 2026-11-01: First build exposed a missing `esp_check.h` include for `ESP_RETURN_ON_ERROR`; added it. Rebuilt successfully with ESP-IDF v5.4 (`main.bin` generated, 62% app partition free).
 - 2026-11-01: Converted scanning to a periodic FreeRTOS task. `wifi_scan_init()` runs once, `wifi_scan_task()` scans/updates OLED then delays 5 seconds, and logs SSID/BSSID/RSSI/channel. Build passed; app partition still has 62% free.
+- 2026-11-01: Added fixed-credential STA connection experiment using SSID `Gang`. OLED shows connecting, connected with IP, or failed after 5 retries. Compared with reference `14_WiFi_STA`; build passed and generated `build/main.bin`.

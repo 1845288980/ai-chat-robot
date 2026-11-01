@@ -24,3 +24,4 @@ ESP-IDF's local `i2c_oled` example and SSD1306 panel implementation were inspect
 - OLED text is ASCII-only; SSIDs are truncated to 18 characters so each numbered line fits the 128x64 display. Hidden SSIDs are shown as `<hidden>`.
 - Periodic refresh uses one FreeRTOS task with `xTaskCreate()` and `vTaskDelay(pdMS_TO_TICKS(5000))`; Wi-Fi stack initialization is guarded so it runs only once.
 - Serial logs now include the raw SSID, BSSID, RSSI, and channel, which distinguishes two AP records that may have similar display names.
+- Fixed-credential STA connection now uses SSID `Gang` and password `18203728650` for this experiment. It registers Wi-Fi/IP event handlers, retries up to 5 times, waits up to 30 seconds for a result, and displays the connected state/IP or failure on the OLED. The password is not printed to logs or OLED.

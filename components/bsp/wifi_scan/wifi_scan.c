@@ -11,15 +11,51 @@
 #include "iic.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/event_groups.h"
 #include "freertos/task.h"
 
 #define WIFI_SCAN_LIST_SIZE 12
 #define WIFI_SCAN_DISPLAY_ROWS 8
 #define WIFI_SCAN_REFRESH_PERIOD_MS 5000
+#define WIFI_TEST_SSID "Gang"
+#define WIFI_TEST_PASSWORD "18203728650"
+#define WIFI_CONNECT_MAX_RETRIES 5
+#define WIFI_CONNECTED_BIT BIT0
+#define WIFI_CONNECT_FAILED_BIT BIT1
 
 static const char *TAG = "wifi_scan";
 static bool s_wifi_initialized;
+static bool s_wifi_started;
 static TaskHandle_t s_wifi_scan_task;
+static EventGroupHandle_t s_wifi_event_group;
+static esp_netif_t *s_sta_netif;
+static uint8_t s_connect_retries;
+
+static void wifi_connection_event_handler(void *arg, esp_event_base_t event_base,
+                                          int32_t event_id, void *event_data)
+{
+    (void)arg;
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
+        esp_wifi_connect();
+        ESP_LOGI(TAG, "connecting to SSID: %s", WIFI_TEST_SSID);
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (s_connect_retries < WIFI_CONNECT_MAX_RETRIES) {
+            ++s_connect_retries;
+            esp_wifi_connect();
+            ESP_LOGW(TAG, "Wi-Fi disconnected, retry %u/%u", s_connect_retries,
+                     WIFI_CONNECT_MAX_RETRIES);
+        } else if (s_wifi_event_group != NULL) {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECT_FAILED_BIT);
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
+        const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)event_data;
+        s_connect_retries = 0;
+        ESP_LOGI(TAG, "got IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        if (s_wifi_event_group != NULL) {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        }
+    }
+}
 
 esp_err_t wifi_scan_init(void)
 {
@@ -37,16 +73,74 @@ esp_err_t wifi_scan_init(void)
     ESP_RETURN_ON_ERROR(esp_netif_init(), TAG, "failed to initialize netif");
     ESP_RETURN_ON_ERROR(esp_event_loop_create_default(), TAG, "failed to create event loop");
 
-    if (esp_netif_create_default_wifi_sta() == NULL) {
+    s_sta_netif = esp_netif_create_default_wifi_sta();
+    if (s_sta_netif == NULL) {
         return ESP_ERR_NO_MEM;
     }
 
     wifi_init_config_t config = WIFI_INIT_CONFIG_DEFAULT();
     ESP_RETURN_ON_ERROR(esp_wifi_init(&config), TAG, "failed to initialize Wi-Fi");
     ESP_RETURN_ON_ERROR(esp_wifi_set_mode(WIFI_MODE_STA), TAG, "failed to set STA mode");
-    ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "failed to start Wi-Fi");
     s_wifi_initialized = true;
     return ESP_OK;
+}
+
+esp_err_t wifi_connect_to_ap(void)
+{
+    ESP_RETURN_ON_ERROR(wifi_scan_init(), TAG, "Wi-Fi initialization failed");
+    if (s_wifi_started) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    s_wifi_event_group = xEventGroupCreate();
+    if (s_wifi_event_group == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                                   wifi_connection_event_handler, NULL),
+                        TAG, "failed to register Wi-Fi handler");
+    ESP_RETURN_ON_ERROR(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                                   wifi_connection_event_handler, NULL),
+                        TAG, "failed to register IP handler");
+
+    wifi_config_t config = {0};
+    snprintf((char *)config.sta.ssid, sizeof(config.sta.ssid), "%s", WIFI_TEST_SSID);
+    snprintf((char *)config.sta.password, sizeof(config.sta.password), "%s", WIFI_TEST_PASSWORD);
+    config.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    ESP_RETURN_ON_ERROR(esp_wifi_set_config(WIFI_IF_STA, &config), TAG,
+                        "failed to set Wi-Fi credentials");
+    ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "failed to start Wi-Fi");
+    s_wifi_started = true;
+
+    iic_oled_clear();
+    iic_oled_write_string(0, 0, "WiFi connecting", true);
+    iic_oled_write_string(0, 1, "SSID: Gang", true);
+    ESP_RETURN_ON_ERROR(iic_oled_update(), TAG, "failed to update OLED");
+
+    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
+                                           WIFI_CONNECTED_BIT | WIFI_CONNECT_FAILED_BIT,
+                                           pdFALSE, pdFALSE,
+                                           pdMS_TO_TICKS(30000));
+    iic_oled_clear();
+    if ((bits & WIFI_CONNECTED_BIT) != 0) {
+        esp_netif_ip_info_t ip_info;
+        ESP_RETURN_ON_ERROR(esp_netif_get_ip_info(s_sta_netif, &ip_info), TAG,
+                            "failed to get IP information");
+        char ip_text[24];
+        snprintf(ip_text, sizeof(ip_text), IPSTR, IP2STR(&ip_info.ip));
+        iic_oled_write_string(0, 0, "WiFi connected", true);
+        iic_oled_write_string(0, 1, "SSID: Gang", true);
+        iic_oled_write_string(0, 2, "IP:", true);
+        iic_oled_write_string(4, 2, ip_text, true);
+        ESP_LOGI(TAG, "connected to SSID: %s", WIFI_TEST_SSID);
+        ESP_RETURN_ON_ERROR(iic_oled_update(), TAG, "failed to update OLED");
+        return ESP_OK;
+    }
+
+    iic_oled_write_string(0, 0, "WiFi connect fail", true);
+    iic_oled_write_string(0, 1, "after 5 retries", true);
+    ESP_RETURN_ON_ERROR(iic_oled_update(), TAG, "failed to update OLED");
+    return ESP_ERR_TIMEOUT;
 }
 
 esp_err_t wifi_scan_show_on_oled(void)
@@ -59,6 +153,10 @@ esp_err_t wifi_scan_show_on_oled(void)
         return ret;
     }
 
+    if (!s_wifi_started) {
+        ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "failed to start Wi-Fi");
+        s_wifi_started = true;
+    }
     ESP_RETURN_ON_ERROR(esp_wifi_scan_start(NULL, true), TAG, "Wi-Fi scan failed");
     ESP_RETURN_ON_ERROR(esp_wifi_scan_get_ap_num(&ap_count), TAG, "failed to get AP count");
     ESP_RETURN_ON_ERROR(esp_wifi_scan_get_ap_records(&record_count, ap_info), TAG,
