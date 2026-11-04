@@ -3,18 +3,21 @@ set(src_dirs
 			led
 			exti
 			wifi_scan
-			tcp_client)
+			tcp_client
+			inmp441)
 			
 set(include_dirs
 			iic
 			led
 			exti
 			wifi_scan
-			tcp_client)
+			tcp_client
+			inmp441)
 
 set(requires
 			driver
             esp_driver_i2c
+            esp_driver_i2s
             esp_event
             esp_netif
             esp_wifi

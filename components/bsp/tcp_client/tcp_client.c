@@ -11,7 +11,7 @@
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
 
-#define TCP_SERVER_IP "192.168.1.142"
+#define TCP_SERVER_IP "192.168.1.22"
 #define TCP_SERVER_PORT 5000
 #define TCP_MESSAGE "hello from ESP32\n"
 #define TCP_RESPONSE_TIMEOUT_MS 3000

@@ -73,3 +73,9 @@ Build the project step by step toward a local voice assistant: ESP32-S3 records 
 - Flash and run this TCP test on the actual board.
 - If the PC address changes again, update `TCP_SERVER_IP` in `components/bsp/tcp_client/tcp_client.c` and reflash, or later replace the fixed address with mDNS/static DHCP reservation.
 - Only after text communication is proven, add audio framing/transfer, then ASR, LLM, TTS, and speaker playback.
+
+### 2026-11-04 INMP441 microphone test
+
+- User purchased and wired an INMP441 module to the ESP32-S3: VDD to 3V3, GND to GND, SCK/BCLK to GPIO6, WS to GPIO7, SD to GPIO15, and L/R to GND (left channel). OLED remains on GPIO4/5.
+- Added the `components/bsp/inmp441` component using the ESP-IDF 5.4 standard I2S RX driver. It captures 16 kHz, 32-bit stereo slots and periodically logs average absolute level and peak from the left channel after shifting the 24-bit microphone samples into a convenient range.
+- `main.c` starts this microphone diagnostic task immediately after OLED initialization and before Wi-Fi, so mic testing does not depend on LAN availability. Verify by monitoring UART logs for `inmp441: audio level`; speak or tap near the microphone and confirm avg_abs/peak rise over quiet readings. This is a signal-capture diagnostic only; audio upload and push-to-talk are not implemented yet.
