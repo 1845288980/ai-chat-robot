@@ -2,6 +2,7 @@
 #include "esp_log.h"
 #include "iic.h"
 #include "wifi_scan.h"
+#include "tcp_client.h"
 
 void app_main(void)
 {
@@ -12,5 +13,7 @@ void app_main(void)
     esp_err_t ret = wifi_connect_to_ap();
     if (ret != ESP_OK) {
         ESP_LOGE("main", "Wi-Fi connection did not succeed: %s", esp_err_to_name(ret));
+        return;
     }
+    ESP_ERROR_CHECK(tcp_client_start());
 }

@@ -2,13 +2,15 @@ set(src_dirs
 			iic
 			led
 			exti
-			wifi_scan)
+			wifi_scan
+			tcp_client)
 			
 set(include_dirs
 			iic
 			led
 			exti
-			wifi_scan)
+			wifi_scan
+			tcp_client)
 
 set(requires
 			driver
