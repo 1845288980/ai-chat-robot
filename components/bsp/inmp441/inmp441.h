@@ -11,7 +11,7 @@ extern "C" {
 #define INMP441_I2S_WS_GPIO   GPIO_NUM_7
 #define INMP441_I2S_DOUT_GPIO GPIO_NUM_15
 
-/** Start the INMP441 I2S receive and serial audio-level test task. */
+/** Start the INMP441 capture and GPIO17 push-to-talk task. */
 esp_err_t inmp441_audio_test_start(void);
 
 #ifdef __cplusplus

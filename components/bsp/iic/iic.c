@@ -4,6 +4,8 @@
 
 #include "driver/i2c_master.h"
 #include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 
 #define IIC_OLED_I2C_PORT       I2C_NUM_0
 #define IIC_OLED_I2C_SPEED_HZ   400000
@@ -17,6 +19,7 @@ static const char *TAG = "ssd1306";
 static i2c_master_bus_handle_t s_i2c_bus;
 static i2c_master_dev_handle_t s_oled_device;
 static uint8_t s_frame_buffer[IIC_OLED_WIDTH * IIC_OLED_PAGE_COUNT];
+static SemaphoreHandle_t s_framebuffer_mutex;
 
 /* 5x7 font, ASCII 0x20 (space) through 0x7F. Each byte is one vertical column. */
 static const uint8_t s_font_5x7[][IIC_OLED_FONT_WIDTH] = {
@@ -58,6 +61,10 @@ static esp_err_t oled_send_commands(const uint8_t *commands, size_t command_coun
 esp_err_t iic_oled_init(gpio_num_t sda_gpio, gpio_num_t scl_gpio, uint8_t i2c_address)
 {
     if (s_oled_device != NULL || s_i2c_bus != NULL) return ESP_ERR_INVALID_STATE;
+    if (s_framebuffer_mutex == NULL) {
+        s_framebuffer_mutex = xSemaphoreCreateMutex();
+        if (s_framebuffer_mutex == NULL) return ESP_ERR_NO_MEM;
+    }
     i2c_master_bus_config_t bus_config = {
         .i2c_port = IIC_OLED_I2C_PORT, .sda_io_num = sda_gpio, .scl_io_num = scl_gpio,
         .clk_source = I2C_CLK_SRC_DEFAULT, .glitch_ignore_cnt = 7, .flags.enable_internal_pullup = true,
@@ -92,17 +99,31 @@ void iic_oled_clear(void) { memset(s_frame_buffer, 0, sizeof(s_frame_buffer)); }
 esp_err_t iic_oled_update(void)
 {
     if (s_oled_device == NULL) return ESP_ERR_INVALID_STATE;
+    xSemaphoreTake(s_framebuffer_mutex, portMAX_DELAY);
     uint8_t page_data[IIC_OLED_WIDTH + 1];
     page_data[0] = 0x40;
     for (uint8_t page = 0; page < IIC_OLED_PAGE_COUNT; ++page) {
         const uint8_t page_command[] = { (uint8_t)(0xB0 + page), 0x00, 0x10 };
         esp_err_t ret = oled_send_commands(page_command, sizeof(page_command));
-        if (ret != ESP_OK) return ret;
+        if (ret != ESP_OK) { xSemaphoreGive(s_framebuffer_mutex); return ret; }
         memcpy(&page_data[1], &s_frame_buffer[page * IIC_OLED_WIDTH], IIC_OLED_WIDTH);
         ret = i2c_master_transmit(s_oled_device, page_data, sizeof(page_data), IIC_OLED_TIMEOUT_MS);
-        if (ret != ESP_OK) return ret;
+        if (ret != ESP_OK) { xSemaphoreGive(s_framebuffer_mutex); return ret; }
     }
+    xSemaphoreGive(s_framebuffer_mutex);
     return ESP_OK;
+}
+
+esp_err_t iic_oled_set_text_row(uint8_t row, const char *text)
+{
+    if (s_oled_device == NULL || row >= IIC_OLED_PAGE_COUNT || text == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    xSemaphoreTake(s_framebuffer_mutex, portMAX_DELAY);
+    memset(&s_frame_buffer[row * IIC_OLED_WIDTH], 0, IIC_OLED_WIDTH);
+    iic_oled_write_string(0, row, text, true);
+    xSemaphoreGive(s_framebuffer_mutex);
+    return iic_oled_update();
 }
 
 void iic_oled_draw_pixel(uint8_t x, uint8_t y, bool on)

@@ -11,11 +11,11 @@ void app_main(void)
     ESP_ERROR_CHECK(iic_oled_init(IIC_OLED_SDA_GPIO_DEFAULT,
                                   IIC_OLED_SCL_GPIO_DEFAULT,
                                   IIC_OLED_I2C_ADDRESS_DEFAULT));
-    ESP_ERROR_CHECK(inmp441_audio_test_start());
     esp_err_t ret = wifi_connect_to_ap();
     if (ret != ESP_OK) {
         ESP_LOGE("main", "Wi-Fi connection did not succeed: %s", esp_err_to_name(ret));
         return;
     }
     ESP_ERROR_CHECK(tcp_client_start());
+    ESP_ERROR_CHECK(inmp441_audio_test_start());
 }

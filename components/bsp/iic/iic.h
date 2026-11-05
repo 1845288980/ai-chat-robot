@@ -28,6 +28,9 @@ void iic_oled_clear(void);
 /** Send the complete local frame buffer to the display. */
 esp_err_t iic_oled_update(void);
 
+/** Replace one 8-pixel text row and update the display without changing other rows. */
+esp_err_t iic_oled_set_text_row(uint8_t row, const char *text);
+
 /** Turn one pixel on or off in the local frame buffer. */
 void iic_oled_draw_pixel(uint8_t x, uint8_t y, bool on);
 
