@@ -43,6 +43,10 @@ class TcpServerProtocolTest(unittest.TestCase):
             try:
                 client_socket.sendall(b"hello from ESP32\n")
                 self.assertEqual(recv_line(client_socket), tcp_server.ACK)
+                self.assertIsNone(server_socket.gettimeout())
+                self.assertEqual(
+                    server_socket.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE), 1
+                )
 
                 pcm = bytes(16000)
                 header = tcp_server.PCM_HEADER.pack(b"PCM1", 16000, 1, 16, len(pcm))

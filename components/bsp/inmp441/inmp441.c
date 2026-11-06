@@ -142,9 +142,21 @@ static void ptt_task(void *arg)
         }
 
         if (!recording && pcm_length > 0) {
-            ESP_LOGI(TAG, "recorded %u PCM bytes: output avg=%" PRIu32 ", peak=%" PRId32
-                     ", raw L/R avg=%" PRIu32 "/%" PRIu32,
-                     (unsigned)pcm_length, (uint32_t)(pcm_absolute_sum / (pcm_length / 2)), pcm_peak,
+            uint32_t pcm_sample_count = pcm_length / sizeof(int16_t);
+            uint32_t pcm_avg_abs = (uint32_t)(pcm_absolute_sum / pcm_sample_count);
+
+            if (pcm_avg_abs == 0 && pcm_peak == 0) {
+                ESP_LOGI(TAG, "no sound");
+                set_audio_status("no sound");
+                vTaskDelay(pdMS_TO_TICKS(3000));
+                set_audio_status("FREE");
+                pcm_length = 0;
+                continue;
+            }
+
+            ESP_LOGI(TAG, "audio level: avg_abs=%" PRIu32 ", peak=%" PRId32
+                     " (16 kHz, left channel)", pcm_avg_abs, pcm_peak);
+            ESP_LOGI(TAG, "raw L/R avg=%" PRIu32 "/%" PRIu32,
                      (uint32_t)(left_absolute_sum / slot_sample_count),
                      (uint32_t)(right_absolute_sum / slot_sample_count));
             set_audio_status("REC DONE");

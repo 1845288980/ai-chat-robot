@@ -13,7 +13,6 @@ from pathlib import Path
 HOST = "0.0.0.0"
 PORT = 5000
 ACK = b"ACK from PC\n"
-CLIENT_IDLE_TIMEOUT_SECONDS = 30
 RECORDINGS_DIR = Path(__file__).resolve().parents[1] / "recordings"
 PCM_HEADER = struct.Struct("!4sIHHI")
 MAX_PCM_BYTES = 16000 * 2 * 10
@@ -67,7 +66,7 @@ def serve_text(connection: socket.socket, first_four: bytes) -> None:
 def serve_client(connection: socket.socket, address: tuple[str, int]) -> None:
     print(f"client connected: {address[0]}:{address[1]}", flush=True)
     with connection:
-        connection.settimeout(CLIENT_IDLE_TIMEOUT_SECONDS)
+        connection.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
         while True:
             try:
                 first_four = recv_exact(connection, 4)
@@ -75,9 +74,6 @@ def serve_client(connection: socket.socket, address: tuple[str, int]) -> None:
                     serve_audio(connection, first_four)
                 else:
                     serve_text(connection, first_four)
-            except socket.timeout:
-                print(f"client idle timeout: {address[0]}:{address[1]}", flush=True)
-                return
             except (ConnectionError, ConnectionResetError, BrokenPipeError) as exc:
                 print(f"client disconnected/reset: {address[0]}:{address[1]} ({exc})", flush=True)
                 return

@@ -21,7 +21,6 @@
 #define WIFI_TEST_PASSWORD "18203728650"
 #define WIFI_CONNECT_MAX_RETRIES 5
 #define WIFI_CONNECTED_BIT BIT0
-#define WIFI_CONNECT_FAILED_BIT BIT1
 
 static const char *TAG = "wifi_scan";
 static bool s_wifi_initialized;
@@ -39,14 +38,18 @@ static void wifi_connection_event_handler(void *arg, esp_event_base_t event_base
         esp_wifi_connect();
         ESP_LOGI(TAG, "connecting to SSID: %s", WIFI_TEST_SSID);
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_connect_retries < WIFI_CONNECT_MAX_RETRIES) {
-            ++s_connect_retries;
-            esp_wifi_connect();
-            ESP_LOGW(TAG, "Wi-Fi disconnected, retry %u/%u", s_connect_retries,
-                     WIFI_CONNECT_MAX_RETRIES);
-        } else if (s_wifi_event_group != NULL) {
-            xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECT_FAILED_BIT);
+        if (s_wifi_event_group != NULL) {
+            xEventGroupClearBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
         }
+        if (s_connect_retries < WIFI_CONNECT_MAX_RETRIES) ++s_connect_retries;
+        else s_connect_retries = 1;
+        esp_err_t ret = esp_wifi_connect();
+        if (ret != ESP_OK) {
+            ESP_LOGW(TAG, "Wi-Fi reconnect request failed: %s", esp_err_to_name(ret));
+        }
+        const wifi_event_sta_disconnected_t *event = event_data;
+        ESP_LOGW(TAG, "Wi-Fi disconnected, reconnect attempt %u/%u, reason=%d",
+                 s_connect_retries, WIFI_CONNECT_MAX_RETRIES, event->reason);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         const ip_event_got_ip_t *event = (const ip_event_got_ip_t *)event_data;
         s_connect_retries = 0;
@@ -112,35 +115,26 @@ esp_err_t wifi_connect_to_ap(void)
     ESP_RETURN_ON_ERROR(esp_wifi_start(), TAG, "failed to start Wi-Fi");
     s_wifi_started = true;
 
-    iic_oled_clear();
-    iic_oled_write_string(0, 0, "WiFi connecting", true);
-    iic_oled_write_string(0, 1, "SSID: Gang", true);
-    ESP_RETURN_ON_ERROR(iic_oled_update(), TAG, "failed to update OLED");
+    ESP_LOGI(TAG, "Wi-Fi started; connection and reconnection run asynchronously");
+    return ESP_OK;
+}
 
-    EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                           WIFI_CONNECTED_BIT | WIFI_CONNECT_FAILED_BIT,
-                                           pdFALSE, pdFALSE,
-                                           pdMS_TO_TICKS(30000));
-    iic_oled_clear();
-    if ((bits & WIFI_CONNECTED_BIT) != 0) {
-        esp_netif_ip_info_t ip_info;
-        ESP_RETURN_ON_ERROR(esp_netif_get_ip_info(s_sta_netif, &ip_info), TAG,
-                            "failed to get IP information");
-        char ip_text[24];
-        snprintf(ip_text, sizeof(ip_text), IPSTR, IP2STR(&ip_info.ip));
-        iic_oled_write_string(0, 0, "WiFi connected", true);
-        iic_oled_write_string(0, 1, "SSID: Gang", true);
-        iic_oled_write_string(0, 2, "IP:", true);
-        iic_oled_write_string(4, 2, ip_text, true);
-        ESP_LOGI(TAG, "connected to SSID: %s", WIFI_TEST_SSID);
-        ESP_RETURN_ON_ERROR(iic_oled_update(), TAG, "failed to update OLED");
-        return ESP_OK;
+bool wifi_scan_is_connected(void)
+{
+    return s_wifi_event_group != NULL &&
+           (xEventGroupGetBits(s_wifi_event_group) & WIFI_CONNECTED_BIT) != 0;
+}
+
+esp_err_t wifi_scan_get_local_ip(char *buffer, size_t capacity)
+{
+    if (buffer == NULL || capacity == 0 || s_sta_netif == NULL || !wifi_scan_is_connected()) {
+        return ESP_ERR_INVALID_STATE;
     }
-
-    iic_oled_write_string(0, 0, "WiFi connect fail", true);
-    iic_oled_write_string(0, 1, "after 5 retries", true);
-    ESP_RETURN_ON_ERROR(iic_oled_update(), TAG, "failed to update OLED");
-    return ESP_ERR_TIMEOUT;
+    esp_netif_ip_info_t ip_info;
+    esp_err_t ret = esp_netif_get_ip_info(s_sta_netif, &ip_info);
+    if (ret != ESP_OK) return ret;
+    int written = snprintf(buffer, capacity, IPSTR, IP2STR(&ip_info.ip));
+    return written < 0 || (size_t)written >= capacity ? ESP_ERR_INVALID_SIZE : ESP_OK;
 }
 
 esp_err_t wifi_scan_show_on_oled(void)

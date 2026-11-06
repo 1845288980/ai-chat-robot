@@ -1,6 +1,7 @@
 #include "tcp_client.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <string.h>
 
 #include "esp_log.h"
@@ -10,12 +11,18 @@
 #include "iic.h"
 #include "lwip/inet.h"
 #include "lwip/sockets.h"
+#include "wifi_scan.h"
 
-#define TCP_SERVER_IP "192.168.1.112"
+#define TCP_SERVER_IP "192.168.1.22"
 #define TCP_SERVER_PORT 5000
 #define TCP_MESSAGE "hello from ESP32\n"
 #define TCP_RESPONSE_TIMEOUT_MS 30000
 #define TCP_RETRY_DELAY_MS 5000
+#define TCP_RETRY_LIMIT 5
+#define TCP_SOCKET_POLL_MS 1000
+#define TCP_KEEPALIVE_IDLE_SECONDS 10
+#define TCP_KEEPALIVE_INTERVAL_SECONDS 5
+#define TCP_KEEPALIVE_PROBES 3
 
 typedef struct {
     const uint8_t *pcm;
@@ -27,11 +34,69 @@ static const char *TAG = "tcp_client";
 static TaskHandle_t s_tcp_task;
 static QueueHandle_t s_audio_queue;
 static volatile esp_err_t s_upload_result;
+static char s_displayed_local_ip[16];
 
-static void tcp_oled_rows(const char *line0, const char *line1)
+static void tcp_set_status(const char *status)
 {
-    if (line0 != NULL) iic_oled_set_text_row(0, line0);
-    if (line1 != NULL) iic_oled_set_text_row(1, line1);
+    esp_err_t ret = iic_oled_set_text_row(2, status);
+    if (ret != ESP_OK) ESP_LOGW(TAG, "OLED network status update failed: %s", esp_err_to_name(ret));
+    ESP_LOGI(TAG, "network status: %s", status);
+}
+
+static void tcp_refresh_local_ip(void)
+{
+    char ip[16] = "no IP";
+    if (wifi_scan_get_local_ip(ip, sizeof(ip)) != ESP_OK) {
+        snprintf(ip, sizeof(ip), "no IP");
+    }
+    if (strcmp(ip, s_displayed_local_ip) == 0) return;
+    snprintf(s_displayed_local_ip, sizeof(s_displayed_local_ip), "%s", ip);
+    char row[22];
+    snprintf(row, sizeof(row), "ESP:%s", ip);
+    esp_err_t ret = iic_oled_set_text_row(0, row);
+    if (ret != ESP_OK) ESP_LOGW(TAG, "OLED ESP32 IP update failed: %s", esp_err_to_name(ret));
+    ESP_LOGI(TAG, "ESP32 IP display updated: %s", ip);
+}
+
+static void tcp_close_socket(int *socket_fd)
+{
+    if (*socket_fd >= 0) {
+        shutdown(*socket_fd, SHUT_RDWR);
+        close(*socket_fd);
+        *socket_fd = -1;
+    }
+}
+
+static bool tcp_socket_is_alive(int socket_fd)
+{
+    char byte;
+    int result = recv(socket_fd, &byte, 1, MSG_PEEK | MSG_DONTWAIT);
+    if (result == 0) {
+        ESP_LOGW(TAG, "peer closed the TCP connection");
+        return false;
+    }
+    if (result < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+        ESP_LOGW(TAG, "TCP keepalive/socket check failed: errno=%d", errno);
+        return false;
+    }
+    return true;
+}
+
+static void tcp_configure_keepalive(int socket_fd)
+{
+    int enabled = 1;
+    int idle = TCP_KEEPALIVE_IDLE_SECONDS;
+    int interval = TCP_KEEPALIVE_INTERVAL_SECONDS;
+    int probes = TCP_KEEPALIVE_PROBES;
+    if (setsockopt(socket_fd, SOL_SOCKET, SO_KEEPALIVE, &enabled, sizeof(enabled)) != 0 ||
+        setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPIDLE, &idle, sizeof(idle)) != 0 ||
+        setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPINTVL, &interval, sizeof(interval)) != 0 ||
+        setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPCNT, &probes, sizeof(probes)) != 0) {
+        ESP_LOGW(TAG, "could not configure all TCP keepalive settings: errno=%d", errno);
+    } else {
+        ESP_LOGI(TAG, "TCP keepalive enabled: idle=%ds interval=%ds probes=%d",
+                 idle, interval, probes);
+    }
 }
 
 static int tcp_connect_to_server(void)
@@ -52,8 +117,8 @@ static int tcp_connect_to_server(void)
     struct timeval timeout = { .tv_sec = TCP_RESPONSE_TIMEOUT_MS / 1000, .tv_usec = 0 };
     setsockopt(socket_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
     setsockopt(socket_fd, SOL_SOCKET, SO_SNDTIMEO, &timeout, sizeof(timeout));
+    tcp_configure_keepalive(socket_fd);
     ESP_LOGI(TAG, "connecting to TCP server %s:%d", TCP_SERVER_IP, TCP_SERVER_PORT);
-    tcp_oled_rows("TCP connecting", "");
     if (connect(socket_fd, (struct sockaddr *)&server_address, sizeof(server_address)) != 0) {
         ESP_LOGW(TAG, "connect() failed: errno=%d", errno);
         close(socket_fd);
@@ -101,7 +166,10 @@ static bool tcp_exchange_text(int socket_fd)
     char response[128];
     if (!tcp_receive_line(socket_fd, response, sizeof(response))) return false;
     ESP_LOGI(TAG, "received: %s", response);
-    tcp_oled_rows("TCP connected", "ACK received");
+    if (strcmp(response, "ACK from PC") != 0) {
+        ESP_LOGW(TAG, "initial TCP test returned unexpected response: %s", response);
+        return false;
+    }
     return true;
 }
 
@@ -122,7 +190,6 @@ static bool tcp_upload_audio(int socket_fd, const audio_request_t *request)
     char response[128];
     if (!tcp_receive_line(socket_fd, response, sizeof(response))) return false;
     ESP_LOGI(TAG, "audio server response: %s", response);
-    tcp_oled_rows("TCP connected", response[0] == 'S' ? "ACK received" : "server error");
     s_upload_result = strncmp(response, "SAVED", 5) == 0 ? ESP_OK : ESP_FAIL;
     return true;
 }
@@ -133,10 +200,11 @@ static void tcp_complete_request(const audio_request_t *request, esp_err_t resul
     xTaskNotifyGive(request->waiter);
 }
 
-static void tcp_fail_pending_audio(void)
+static void tcp_fail_pending_audio(const char *reason)
 {
     audio_request_t request;
     while (xQueueReceive(s_audio_queue, &request, 0) == pdTRUE) {
+        ESP_LOGW(TAG, "failing queued audio upload: %s", reason);
         tcp_complete_request(&request, ESP_FAIL);
     }
 }
@@ -145,36 +213,87 @@ static void tcp_client_task(void *arg)
 {
     (void)arg;
     int socket_fd = -1;
+    unsigned consecutive_failures = 0;
+    bool link_was_up = false;
+
+    s_displayed_local_ip[0] = '\0';
+    iic_oled_set_text_row(0, "ESP:no IP");
+    char pc_row[22];
+    snprintf(pc_row, sizeof(pc_row), "PC:%s", TCP_SERVER_IP);
+    iic_oled_set_text_row(1, pc_row);
+    tcp_set_status("try to connect");
+
     while (true) {
+        tcp_refresh_local_ip();
+
+        if (!wifi_scan_is_connected()) {
+            tcp_fail_pending_audio("Wi-Fi is not connected");
+            if (socket_fd >= 0) {
+                if (link_was_up) tcp_set_status("disconnect");
+                ESP_LOGW(TAG, "Wi-Fi unavailable; closing TCP socket");
+                tcp_close_socket(&socket_fd);
+                link_was_up = false;
+                tcp_set_status("try to connect");
+            }
+            vTaskDelay(pdMS_TO_TICKS(TCP_SOCKET_POLL_MS));
+            continue;
+        }
+
         if (socket_fd < 0) {
+            tcp_set_status("try to connect");
+            ESP_LOGI(TAG, "TCP connection attempt %u/%u", consecutive_failures + 1,
+                     TCP_RETRY_LIMIT);
             socket_fd = tcp_connect_to_server();
             if (socket_fd < 0) {
-                tcp_oled_rows("TCP connect fail", "retry in 5 seconds");
-                tcp_fail_pending_audio();
+                ++consecutive_failures;
+                tcp_fail_pending_audio("TCP connection failed");
+                if (consecutive_failures >= TCP_RETRY_LIMIT) {
+                    tcp_set_status("failed,reset for 5s");
+                    ESP_LOGW(TAG, "TCP failed %u consecutive attempts; restarting retry cycle",
+                             consecutive_failures);
+                    consecutive_failures = 0;
+                }
                 vTaskDelay(pdMS_TO_TICKS(TCP_RETRY_DELAY_MS));
                 continue;
             }
+            if (!tcp_exchange_text(socket_fd)) {
+                ++consecutive_failures;
+                tcp_close_socket(&socket_fd);
+                tcp_fail_pending_audio("TCP round-trip test failed");
+                if (consecutive_failures >= TCP_RETRY_LIMIT) {
+                    tcp_set_status("failed,reset for 5s");
+                    ESP_LOGW(TAG, "TCP test failed %u consecutive attempts; restarting retry cycle",
+                             consecutive_failures);
+                    consecutive_failures = 0;
+                }
+                vTaskDelay(pdMS_TO_TICKS(TCP_RETRY_DELAY_MS));
+                continue;
+            }
+            ESP_LOGI(TAG, "one-time TCP round-trip test passed");
+            consecutive_failures = 0;
+            link_was_up = true;
+            tcp_set_status("connecting");
         }
 
         audio_request_t request;
-        if (xQueueReceive(s_audio_queue, &request, pdMS_TO_TICKS(TCP_RETRY_DELAY_MS)) == pdTRUE) {
+        if (xQueueReceive(s_audio_queue, &request, pdMS_TO_TICKS(TCP_SOCKET_POLL_MS)) == pdTRUE) {
             bool connected = tcp_upload_audio(socket_fd, &request);
             tcp_complete_request(&request, connected ? s_upload_result : ESP_FAIL);
             if (!connected) {
-                tcp_oled_rows("TCP disconnected", "reconnecting");
-                shutdown(socket_fd, SHUT_RDWR);
-                close(socket_fd);
-                socket_fd = -1;
+                ESP_LOGW(TAG, "TCP connection lost while uploading audio");
+                tcp_set_status("disconnect");
+                tcp_close_socket(&socket_fd);
+                link_was_up = false;
+                tcp_set_status("try to connect");
             }
             continue;
         }
 
-        if (!tcp_exchange_text(socket_fd)) {
-            tcp_oled_rows("TCP disconnected", "reconnecting");
-            shutdown(socket_fd, SHUT_RDWR);
-            close(socket_fd);
-            socket_fd = -1;
-            vTaskDelay(pdMS_TO_TICKS(TCP_RETRY_DELAY_MS));
+        if (!wifi_scan_is_connected() || !tcp_socket_is_alive(socket_fd)) {
+            tcp_set_status("disconnect");
+            tcp_close_socket(&socket_fd);
+            link_was_up = false;
+            tcp_set_status("try to connect");
         }
     }
 }
